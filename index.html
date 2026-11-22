@@ -26,7 +26,7 @@ button,input,textarea,select{font:inherit}button{cursor:pointer}.wrap{max-width:
 <div class="field"><label>النوع الموسيقي</label><div class="chips" id="genres"><button class="chip active" data-value="Pop">بوب</button><button class="chip" data-value="Arabic Tarab">طرب</button><button class="chip" data-value="R&B">R&B</button><button class="chip" data-value="Hip-hop">هيب هوب</button><button class="chip" data-value="Rock">روك</button><button class="chip" data-value="Acoustic">أكوستيك</button><button class="chip" data-value="Electronic">إلكتروني</button><button class="chip" data-value="Cinematic">سينمائي</button><button class="chip" data-value="Jazz">جاز</button><button class="chip" data-value="Classical">كلاسيكي</button></div></div>
 <div class="two"><div class="field"><label for="mood">المزاج</label><select id="mood"><option>مبهج ومتفائل</option><option>رومانسي وهادئ</option><option>حزين وعاطفي</option><option>حماسي وقوي</option><option>ملحمي ودرامي</option><option>مرح وراقص</option><option>تأملي وهادئ</option></select></div><div class="field"><label for="voice">الصوت</label><select id="voice"><option value="any">اختيار مناسب تلقائياً</option><option value="male">رجالي</option><option value="female">نسائي</option><option value="duet">ثنائي</option><option value="instrumental">موسيقى فقط — دون غناء</option></select></div></div>
 <button class="generate" id="generate">✦ أنشئ الأغنية الآن</button><div class="status" id="status" role="status" aria-live="polite">اكتب وصفك واضغط إنشاء لتبدأ الرحلة الموسيقية.</div>
-<div class="smallnote">ملاحظة: إنشاء ملف غنائي حقيقي يحتاج إلى ربط خدمة توليد موسيقى وصوت من جهة الخادم بمسار <b>/api/generate-song</b>. لا تضع مفاتيح API داخل صفحة المتصفح.</div>
+<div class="smallnote">محرك التجربة المفتوح المصدر: ACE-Step 1.5. لتشغيله مجاناً على جهازك شغّل خادم ACE-Step محلياً ثم افتح الصفحة مع <b>?local=1</b>. وللتشغيل عبر رابط الموقع يلزم ربط عنوان خادم ACE-Step في إعدادات Vercel؛ لا توجد خدمة GPU سحابية مجانية مضمونة بلا حدود.</div>
 </div>
 <aside class="side">
 <div class="panel"><div class="cover" id="cover"><div class="disc"></div></div><div class="track" id="trackName">أغنيتك القادمة</div><div class="sub" id="trackMeta">ستظهر تفاصيل الأغنية هنا</div><audio id="audio" controls></audio><div class="status" id="playerStatus">🎧 مساحة الاستماع — سيبدأ التشغيل تلقائياً عند وصول الملف.</div></div>
@@ -40,22 +40,72 @@ $('genres').addEventListener('click',e=>{const b=e.target.closest('button[data-v
 function syncDialect(){const ar=$('language').value==='ar';$('dialectField').style.opacity=ar?'1':'.42';$('dialect').disabled=!ar;}
 $('language').addEventListener('change',syncDialect);syncDialect();
 function setStatus(message,type=''){const el=$('status');el.textContent=message;el.className='status '+type;}
+const localEngine=new URLSearchParams(location.search).get('local')==='1';
+const languageNames={auto:'unknown',ar:'Arabic',en:'English',fr:'French',de:'German',it:'Italian',es:'Spanish',pt:'Portuguese',zh:'Chinese',ko:'Korean',ja:'Japanese',hi:'Hindi',ur:'Urdu',tr:'Turkish',ru:'Russian',nl:'Dutch',sv:'Swedish',pl:'Polish',el:'Greek',he:'Hebrew',id:'Indonesian',th:'Thai',vi:'Vietnamese'};
+function songRequestData(prompt){
+ const language=$('language').value;
+ const dialect=language==='ar'&&$('dialect').value!=='auto' ? $('dialect').value : '';
+ const voice=$('voice').value;
+ const voiceText=voice==='male'?'male lead singer':voice==='female'?'female lead singer':voice==='duet'?'male and female vocal duet':voice==='instrumental'?'instrumental only, no vocals':'suitable expressive lead vocals';
+ const description=[prompt,'Genre: '+genre,'Mood: '+$('mood').value,language==='auto'?'Detect the language from the user description.':'Lyrics/vocals language: '+languageNames[language],dialect?'Arabic dialect: '+dialect:'',voiceText,'Create an original complete song with coherent melody, arrangement and natural-sounding vocals.'].filter(Boolean).join('. ');
+ return {sample_mode:true,sample_query:description,thinking:true,vocal_language:language==='auto'?'unknown':language,audio_format:'mp3',batch_size:1,inference_steps:8,instrumental:voice==='instrumental'};
+}
+async function readJson(response){
+ let data={};try{data=await response.json();}catch{}
+ if(!response.ok)throw new Error(data.error||data.detail||data.message||'تعذر الاتصال بمحرك الموسيقى.');
+ return data;
+}
+async function startSong(prompt){
+ const payload=songRequestData(prompt);
+ if(localEngine){
+  const data=await readJson(await fetch('http://127.0.0.1:8001/release_task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}));
+  const task=data.data?.task_id||data.task_id;if(!task)throw new Error(data.error||'لم يستلم الخادم رقم المهمة.');
+  return {taskId:task,local:true};
+ }
+ const data=await readJson(await fetch('/api/generate-song',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start',...payload})}));
+ if(!data.taskId)throw new Error(data.error||'لم يستلم الخادم رقم المهمة.');
+ return {taskId:data.taskId,local:false};
+}
+async function checkSong(job){
+ if(job.local){
+  const data=await readJson(await fetch('http://127.0.0.1:8001/query_result',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id_list:[job.taskId]})}));
+  const item=data.data?.[0];if(!item)return {status:'processing'};
+  if(item.status===2)return {status:'failed',error:'فشل محرك ACE-Step في إنشاء الأغنية.'};
+  if(item.status!==1)return {status:'processing'};
+  let result=item.result;try{if(typeof result==='string')result=JSON.parse(result);}catch{}
+  const track=Array.isArray(result)?result[0]:result;
+  if(!track?.file)throw new Error('اكتمل التوليد لكن رابط الصوت غير موجود في النتيجة.');
+  const audioUrl=new URL(track.file,'http://127.0.0.1:8001').toString();
+  return {status:'done',audioUrl,title:'أغنيتك الجديدة'};
+ }
+ return await readJson(await fetch('/api/generate-song',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'status',taskId:job.taskId})}));
+}
 $('generate').addEventListener('click',async()=>{
  const prompt=$('prompt').value.trim();if(!prompt){setStatus('اكتب وصف الأغنية أولاً حتى نعرف ماذا نصنع لك.','error');$('prompt').focus();return;}
- const btn=$('generate');btn.disabled=true;btn.textContent='⏳ جارٍ تجهيز أغنيتك…';setStatus('نرسل وصفك إلى محرك صناعة الموسيقى…');
- $('audio').pause();$('audio').removeAttribute('src');$('audio').load();$('audio').style.display='none';
+ const btn=$('generate');btn.disabled=true;btn.textContent='⏳ جارٍ تجهيز أغنيتك…';setStatus('نتصل بمحرك ACE-Step المجاني ونجهز طلب الأغنية…');
+ $('audio').pause();$('audio').removeAttribute('src');$('audio').load();$('audio').style.display='none';$('cover').classList.remove('playing');
  try{
-  const response=await fetch('/api/generate-song',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,language:$('language').value,dialect:$('language').value==='ar'?$('dialect').value:null,genre,mood:$('mood').value,voice:$('voice').value,autoPlay:true})});
-  if(!response.ok){let detail='';try{const data=await response.json();detail=data.error||data.message||'';}catch{}throw new Error(detail|| (response.status===404?'خدمة توليد الأغاني غير مربوطة بعد. يلزم إعداد محرك موسيقى على الخادم.':'تعذر إنشاء الأغنية. حاول مرة أخرى.'));}
-  const data=await response.json();const audioUrl=data.audioUrl||data.audio_url||data.url;
-  if(!audioUrl)throw new Error('وصل رد من الخدمة دون رابط ملف صوتي.');
-  $('trackName').textContent=data.title||'أغنيتك الجديدة';$('trackMeta').textContent=[data.languageName||$('language').selectedOptions[0].text,genre,$('mood').value].join(' · ');
-  $('audio').src=audioUrl;$('audio').style.display='block';$('audio').load();$('cover').classList.add('playing');
+  const job=await startSong(prompt);setStatus('تم استلام الطلب. محرك الموسيقى يعمل الآن…');
+  const deadline=Date.now()+10*60*1000;let result;
+  while(Date.now()<deadline){
+   await new Promise(resolve=>setTimeout(resolve,8000));
+   result=await checkSong(job);
+   if(result.status==='done')break;
+   if(result.status==='failed')throw new Error(result.error||'فشل توليد الأغنية.');
+   setStatus('الأغنية قيد التأليف والتسجيل… قد يستغرق ذلك عدة دقائق.');
+  }
+  if(!result||result.status!=='done')throw new Error('استغرق التوليد أكثر من 10 دقائق. يمكنك المحاولة مرة أخرى.');
+  $('trackName').textContent=result.title||'أغنيتك الجديدة';
+  $('trackMeta').textContent=[$('language').selectedOptions[0].text,genre,$('mood').value].join(' · ');
+  $('audio').src=result.audioUrl;$('audio').style.display='block';$('audio').load();$('cover').classList.add('playing');
   $('audio').onplay=()=>{$('cover').classList.add('playing');$('playerStatus').textContent='♪ تعمل أغنيتك الآن';};
   $('audio').onpause=()=> $('cover').classList.remove('playing');
   try{await $('audio').play();$('playerStatus').textContent='♪ تعمل أغنيتك الآن';}catch{$('playerStatus').textContent='الأغنية جاهزة — اضغط تشغيل للاستماع.';}
   setStatus('اكتملت الأغنية بنجاح. استمتع بها!','ok');
- }catch(err){setStatus(err.message,'error');$('playerStatus').textContent='بانتظار ربط محرك توليد الموسيقى.';}
- finally{btn.disabled=false;btn.textContent='✦ أنشئ الأغنية الآن';}
+ }catch(err){
+  const message=err.message||'حدث خطأ أثناء التوليد.';
+  setStatus(message+(localEngine?'':' — تأكد من إعداد ACESTEP_API_URL على Vercel.'),'error');
+  $('playerStatus').textContent='تعذر الاتصال بمحرك الموسيقى.';
+ }finally{btn.disabled=false;btn.textContent='✦ أنشئ الأغنية الآن';}
 });
 </script></body></html>
